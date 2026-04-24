@@ -1,9 +1,10 @@
 """News monitoring via Google News RSS and optional NewsAPI."""
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
 
-import feedparser
 import requests
 
 from config import GOOGLE_NEWS_RSS, NEWS_API_KEY
@@ -12,21 +13,38 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_google_news(query: str, max_results: int = 20) -> list[dict]:
-    """Fetch articles from Google News RSS for a given query string."""
+    """Fetch articles from Google News RSS using requests + stdlib XML (no feedparser)."""
     url = GOOGLE_NEWS_RSS.format(query=quote_plus(query))
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; FiagroMonitor/1.0)"}
     try:
-        feed = feedparser.parse(url)
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        channel = root.find("channel")
+        if channel is None:
+            return []
         articles = []
-        for entry in feed.entries[:max_results]:
+        for item in channel.findall("item")[:max_results]:
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            pub_raw = item.findtext("pubDate", "")
+            summary = _strip_html(item.findtext("description", ""))
+            source_el = item.find("source")
+            source = source_el.text if source_el is not None else "Google News"
+
             published = None
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
-                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            if pub_raw:
+                try:
+                    published = parsedate_to_datetime(pub_raw)
+                except Exception:
+                    pass
+
             articles.append({
-                "title": entry.get("title", ""),
-                "url": entry.get("link", ""),
-                "source": entry.get("source", {}).get("title", "Google News"),
+                "title": title,
+                "url": link,
+                "source": source,
                 "published_date": published,
-                "summary": _strip_html(entry.get("summary", "")),
+                "summary": summary,
             })
         return articles
     except Exception as e:
